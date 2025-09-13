@@ -1,0 +1,247 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database - 통합 데이터베이스 (여러 서비스용 DB 생성)
+  postgres:
+    image: postgres:15-alpine
+    container_name: synapse-postgres
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_MULTIPLE_DATABASES: synapse_users,synapse_graph,synapse_search,synapse_ingestion
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    networks:
+      - synapse-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: synapse-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - synapse-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Neo4j Graph Database
+  neo4j:
+    image: neo4j:5.14-community
+    container_name: synapse-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/synapse_password
+      NEO4J_dbms_default__database: neo4j
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 512m
+      NEO4J_dbms_memory_pagecache_size: 256m
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/import
+      - neo4j_plugins:/plugins
+    networks:
+      - synapse-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # API Gateway
+  gateway:
+    build: ./services/gateway
+    container_name: synapse-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      JWT_SECRET: synapse_jwt_secret_key_change_in_production
+      USERS_SERVICE_URL: http://users:3001
+      GRAPH_SERVICE_URL: http://graph:3002
+      SEARCH_SERVICE_URL: http://search:3003
+      INGESTION_SERVICE_URL: http://ingestion:3004
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+      - users
+      - graph
+      - search
+      - ingestion
+    networks:
+      - synapse-network
+    volumes:
+      - ./services/gateway:/app
+      - /app/node_modules
+
+  # Users & Auth Service
+  users:
+    build: ./services/users
+    container_name: synapse-users
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: password
+      DATABASE_NAME: synapse_users
+      JWT_SECRET: synapse_jwt_secret_key_change_in_production
+      JWT_EXPIRATION: 7d
+      REDIS_URL: redis://redis:6379
+      GATEWAY_URL: http://localhost:3000
+      FRONTEND_URL: http://localhost:5173
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - synapse-network
+    volumes:
+      - ./services/users:/app
+      - /app/node_modules
+
+  # Knowledge Graph Service
+  graph:
+    build: ./services/graph
+    container_name: synapse-graph
+    ports:
+      - "3002:3002"
+    environment:
+      NODE_ENV: development
+      PORT: 3002
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: password
+      DATABASE_NAME: synapse_graph
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: synapse_password
+      JWT_SECRET: synapse_jwt_secret_key_change_in_production
+      REDIS_URL: redis://redis:6379
+      GATEWAY_URL: http://localhost:3000
+      FRONTEND_URL: http://localhost:5173
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    networks:
+      - synapse-network
+    volumes:
+      - ./services/graph:/app
+      - /app/node_modules
+
+  # Search Service
+  search:
+    build: ./services/search
+    container_name: synapse-search
+    ports:
+      - "3003:3003"
+    environment:
+      NODE_ENV: development
+      PORT: 3003
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/synapse_search
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: password
+      DATABASE_NAME: synapse_search
+      JWT_SECRET: synapse_jwt_secret_key_change_in_production
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - synapse-network
+    volumes:
+      - ./services/search:/app
+      - /app/node_modules
+
+  # Ingestion Service
+  ingestion:
+    build: ./services/ingestion
+    container_name: synapse-ingestion
+    ports:
+      - "3004:3004"
+    environment:
+      NODE_ENV: development
+      PORT: 3004
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/synapse_ingestion
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: password
+      DATABASE_NAME: synapse_ingestion
+      JWT_SECRET: synapse_jwt_secret_key_change_in_production
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - synapse-network
+    volumes:
+      - ./services/ingestion:/app
+      - /app/node_modules
+
+  # Frontend (React)
+  frontend:
+    build: ./frontend/synapse-frontend
+    container_name: synapse-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:3000
+    depends_on:
+      - gateway
+    networks:
+      - synapse-network
+    volumes:
+      - ./frontend/synapse-frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host
+
+networks:
+  synapse-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:
