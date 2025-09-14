@@ -1,5 +1,9 @@
 # CLAUDE.md - Synapse "기억의 비서" 프로젝트 완전 기록
 
+#IMPORTANTS
+- Before performing any task, make sure to review the contents of ‘/docs/todos.md’ (including todos) and check the progress first. After completing the task, be sure to update todos.md accordingly.
+
+
 이 파일은 Synapse 지식 관리 시스템 개발의 모든 진행사항을 완전히 기록합니다.
 
 ---
